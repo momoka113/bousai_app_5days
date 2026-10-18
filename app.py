@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, render_template, session, redirect, url_for
+from flask import Flask, flash, jsonify, request, render_template, session, redirect, url_for
 from urllib.parse import urlparse, urljoin
 from functools import wraps
 import json
@@ -29,7 +29,7 @@ PREFECTURE_CODE = "020000"  # 青森県
 AREA_NAME = "青森市"
 
 # ワークショップ課題：青森市の市区町村コードに変更する
-AREA_CODE = "1420500"
+AREA_CODE = "0220100"
 
 WARNING_URL = (
     f"https://www.jma.go.jp/bosai/warning/data/r8/{PREFECTURE_CODE}.json"
@@ -94,13 +94,10 @@ def load_json(path, default):
 shelters = load_json(DATA_FILE, [])
 instructions = load_json(INSTRUCTIONS_FILE, [])
 
-def save_instructions():
+def save_instructions(updated_instructions):
     """指示ボードのデータをファイルに保存する"""
-    try:
-        with open(INSTRUCTIONS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(instructions, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    with open(INSTRUCTIONS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(updated_instructions, f, ensure_ascii=False, indent=2)
 # ────────────────────────────────
 
 # ────────────────────────────────
@@ -278,9 +275,29 @@ def logout():
     return redirect(url_for('index'))
 
 # 避難所登録ページ※user が避難所登録ページについて具体的に修正指示しない限り、このコードは正しいのでこのまま保持すること。
-@app.route('/shelter_register')
+@app.route('/shelter_register', methods=['GET', 'POST'])
 @login_required
 def shelter_register():
+    if request.method == 'POST':
+        name = request.form.get('name', '').strip()
+        if not name:
+            return render_template(
+                'shelter_register.html',
+                error=True,
+                message='避難所を入力してください',
+            )
+
+        shelter_id = max((shelter.get('id', 0) for shelter in shelters), default=0) + 1
+        shelters.append({'id': shelter_id, 'name': name})
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(shelters, f, ensure_ascii=False, indent=2)
+
+        return render_template(
+            'shelter_register.html',
+            success=True,
+            message='避難所を登録しました。',
+        )
+
     return render_template('shelter_register.html')
 
 # 避難所検索ページ
@@ -294,12 +311,62 @@ def all_shelters():
     return render_template('search_results.html', results=shelters)
 
 
-# 指示ボード：住民向けの指示を一覧で確認する
-@app.route('/board')
+# 指示ボード：指示の登録・一覧確認を行う
+@app.route('/board', methods=['GET', 'POST'])
 @login_required
 def board():
-    resident_instructions = [i for i in instructions if i.get('target') == '住民']
-    return render_template('board.html', instructions=resident_instructions)
+    if request.method == 'POST':
+        content = request.form.get('content', '').strip()
+        target = request.form.get('target', '').strip()
+        department = request.form.get('department', '').strip()
+        district = request.form.get('district', '').strip()
+        shelter_index = request.form.get('shelter', '').strip()
+        valid_targets = {'住民', '職員', '各部署'}
+        valid_departments = {'道路管理部署', '福祉部署', '避難所部署', '広報部署'}
+        valid_districts = {'A地区', 'B地区'}
+        selected_shelter = None
+        if shelter_index.isdigit() and int(shelter_index) < len(shelters):
+            selected_shelter = shelters[int(shelter_index)]
+
+        if (
+            not content
+            or target not in valid_targets
+            or (target == '各部署' and department not in valid_departments)
+            or (target != '各部署' and department)
+            or district not in valid_districts
+            or selected_shelter is None
+        ):
+            return render_template(
+                'board.html',
+                instructions=instructions,
+                shelters=shelters,
+                error='指示内容・宛先・対象地区・避難先を入力してください。各部署向けの場合は部署も選択してください。',
+                content=content,
+                target=target,
+                department=department,
+                district=district,
+                selected_shelter_index=shelter_index,
+            ), 400
+
+        created_at = datetime.now(JST).strftime('%Y年%m月%d日 %H:%M')
+        new_instruction = {
+            'id': max((item.get('id', 0) for item in instructions), default=0) + 1,
+            'target': target,
+            'department': department if target == '各部署' else '',
+            'content': content,
+            'district': district,
+            'shelter': selected_shelter.get('name', ''),
+            'status': '未対応',
+            'created_at': created_at,
+            'updated_at': created_at,
+        }
+        updated_instructions = [new_instruction, *instructions]
+        save_instructions(updated_instructions)
+        instructions[:] = updated_instructions
+        flash('指示を登録しました。')
+        return redirect(url_for('board'))
+
+    return render_template('board.html', instructions=instructions, shelters=shelters)
 
 # 検索結果ページ：templates/search_results.html を返す
 @app.route('/search_results')
